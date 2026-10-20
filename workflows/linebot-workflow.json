@@ -1,0 +1,123 @@
+{
+  "name": "LINE stateless text chatbot",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "linebot-inbound",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "76f3a27e-18a7-4d49-9c4a-86fc7759dc01",
+      "name": "LINE Gateway",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 300],
+      "webhookId": "linebot-inbound"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const envelope = $input.first()?.json ?? {};\nconst payload = envelope.body ?? envelope;\nconst events = Array.isArray(payload.events) ? payload.events : [];\nconst memo = $getWorkflowStaticData('global');\nconst now = Date.now();\nif (!memo.seen) memo.seen = {};\nfor (const [id, stamp] of Object.entries(memo.seen)) { if (now - stamp > 6 * 60 * 60 * 1000) delete memo.seen[id]; }\nconst out = [];\nfor (const event of events) {\n  if (event.type !== 'message' || event.message?.type !== 'text' || !event.replyToken || !event.message.text) continue;\n  const id = event.webhookEventId;\n  if (id && memo.seen[id]) continue;\n  if (id) memo.seen[id] = now;\n  out.push({ json: { replyToken: event.replyToken, text: String(event.message.text).slice(0, 4000), eventId: id || '' } });\n}\nreturn out;"
+      },
+      "id": "76f3a27e-18a7-4d49-9c4a-86fc7759dc02",
+      "name": "Filter text and deduplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const text = $json.text;\nif (!$env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured');\nreturn { json: { ...$json, geminiRequest: { contents: [{ role: 'user', parts: [{ text }] }], systemInstruction: { parts: [{ text: '你是一個友善的 LINE 助理。請使用繁體中文回答，內容清楚精簡，不使用 Markdown 表格。每次只根據目前這則訊息回答，不假設或引用先前對話。' }] }, generationConfig: { temperature: 0.7, maxOutputTokens: 800 } } } };"
+      },
+      "id": "76f3a27e-18a7-4d49-9c4a-86fc7759dc03",
+      "name": "Prepare Gemini request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent($env.GEMINI_MODEL || 'gemini-3.1-flash-lite') + ':generateContent' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-goog-api-key", "value": "={{ $env.GEMINI_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.geminiRequest) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "76f3a27e-18a7-4d49-9c4a-86fc7759dc04",
+      "name": "Ask Gemini",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 300],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const original = $('Prepare Gemini request').item.json;\nconst parts = $json.candidates?.[0]?.content?.parts ?? [];\nconst answer = parts.map(part => part.text || '').join('').trim() || '抱歉，我目前無法產生回覆，請稍後再試。';\nreturn { json: { replyToken: original.replyToken, answer: answer.slice(0, 4900) } };"
+      },
+      "id": "76f3a27e-18a7-4d49-9c4a-86fc7759dc05",
+      "name": "Prepare LINE reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 260]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const original = $('Prepare Gemini request').item.json;\nreturn { json: { replyToken: original.replyToken, answer: '抱歉，AI 服務暫時無法使用，請稍後再試。' } };"
+      },
+      "id": "76f3a27e-18a7-4d49-9c4a-86fc7759dc06",
+      "name": "Prepare fallback reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.CHANNEL_ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { replyToken: $json.replyToken, messages: [{ type: 'text', text: $json.answer }] } }}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "76f3a27e-18a7-4d49-9c4a-86fc7759dc07",
+      "name": "Reply to LINE",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 300],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "LINE Gateway": { "main": [[{ "node": "Filter text and deduplicate", "type": "main", "index": 0 }]] },
+    "Filter text and deduplicate": { "main": [[{ "node": "Prepare Gemini request", "type": "main", "index": 0 }]] },
+    "Prepare Gemini request": { "main": [[{ "node": "Ask Gemini", "type": "main", "index": 0 }]] },
+    "Ask Gemini": { "main": [[{ "node": "Prepare LINE reply", "type": "main", "index": 0 }], [{ "node": "Prepare fallback reply", "type": "main", "index": 0 }]] },
+    "Prepare LINE reply": { "main": [[{ "node": "Reply to LINE", "type": "main", "index": 0 }]] },
+    "Prepare fallback reply": { "main": [[{ "node": "Reply to LINE", "type": "main", "index": 0 }]] }
+  },
+  "active": true,
+  "settings": { "executionOrder": "v1", "saveDataSuccessExecution": "none", "saveDataErrorExecution": "none" },
+  "versionId": "6bb8ee94-fd9d-4d49-8106-f50d5835f48a",
+  "meta": { "templateCredsSetupCompleted": true },
+  "tags": []
+}

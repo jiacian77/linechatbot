@@ -1,35 +1,41 @@
-# LINE Gemini Bot
+# LINE Gemini Bot（Docker Compose + n8n）
 
-依照 [HackMD 教學](https://hackmd.io/@chenmoucheng/linebot-by-codex#/1) 的流程建立：LINE Messaging API webhook、Gemini 繁體中文對話、圖片理解。使用環境變數保存憑證。
+本專案依照[老師的 HackMD 投影片](https://hackmd.io/@chenmoucheng/linebot-by-codex#/1)，在 Windows PC 以 Docker Compose 執行 n8n、LINE webhook gateway 與 Tailscale Funnel，再由 Gemini 提供雲端模型回覆。架構細節與驗收步驟請看 [plan.md](plan.md)。
 
-## Windows 本機啟動
+## Windows 啟動
 
-1. 安裝 Python 3.10+ 和 Node.js。
-2. 在 PowerShell 開啟本資料夾，執行：
-
-   ```powershell
-   py -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install -r requirements.txt
-   Copy-Item .env.example .env
-   notepad .env
-   ```
-
-3. 在 `.env` 填入 LINE Developers 的 Channel access token、Channel secret，以及 Google AI Studio 的 API key。
-4. 啟動程式：
+1. 開啟 Docker Desktop，等待 Linux engine 啟動。
+2. 在 PowerShell 執行一次：
 
    ```powershell
-   python bot.py
+   .\scripts\configure.ps1
    ```
 
-5. 開另一個 PowerShell 視窗，執行 `npx localtunnel --port 8080`。若要固定子網域，可使用 `npx localtunnel --port 8080 --subdomain 你選的名稱`。
-6. 將隧道網址加上 `/callback`，填入 LINE Developers 的 Webhook URL，啟用 Use webhook，並使用 Verify 確認。
-7. 到 LINE Official Account Manager 關閉不需要的自動回應／Greeting message，以免與程式回覆重複。
+   這會在本機 `.env` 產生 n8n 的加密金鑰，不會輸出金鑰值。
+3. 確認 `.env` 已有 LINE `CHANNEL_ACCESS_TOKEN`、`CHANNEL_SECRET`、Google `GEMINI_API_KEY`。Tailscale 會用互動式登入加入，不需要 auth key。切勿分享 `.env`。
+4. 啟動容器：
 
-健康檢查網址為 `http://localhost:8080/health`。Webhook 為 `/callback`。程式支援文字和圖片訊息，對話脈絡保留在記憶體中，程式重啟後會清除。
+   ```powershell
+   docker compose up -d --build
+   docker compose ps -a
+   ```
 
-## LINE 憑證取得
+5. 開啟 `http://localhost:5678`，建立本機 n8n 管理帳號，找到並發布 `LINE stateless text chatbot`。
+6. 執行 `.\scripts\connect-tailscale.ps1` 開啟互動式登入視窗，在已登入的 Tailscale 瀏覽器開啟該視窗顯示的連結並確認加入 `linebot` 裝置。授權完成後，啟用 Funnel 並取得公開 HTTPS 網址：
 
-- 在 LINE Developers Console 的 Messaging API channel 查看 Channel secret，並簽發 Channel access token。
-- 在 Google AI Studio 建立 Gemini API key。
-- 請勿將 `.env` 或任何金鑰加入 Git，也不要把金鑰貼到公開聊天室。
+   ```powershell
+   docker compose exec tailscale tailscale funnel --bg http://127.0.0.1:8080
+   docker compose exec tailscale tailscale funnel status
+   ```
+
+7. 在 LINE Developers 設定 Webhook URL 為 `https://你的 Funnel 網址/line/webhook`，Verify 成功後開啟 Use webhook。測試前確認官方帳號自動回應與歡迎訊息關閉。
+
+## 架構與限制
+
+- Gateway 驗證 LINE 簽章後轉交 n8n；workflow 篩選文字、去重、呼叫 Gemini 並透過 LINE Reply API 回覆。
+- 依老師投影片採 stateless 設計，只處理當次文字；貼圖、圖片、影片、語音不回覆，也不保留短期記憶。
+- n8n UI 僅綁定本機 `127.0.0.1:5678`；公開 Funnel 只連到 gateway。
+- 成功與失敗執行內容不保存。`.env`、LINE/Gemini 憑證不得加入 Git 或貼到公開聊天室。
+- `docker compose down` 保留資料；`docker compose down -v` 會刪除 n8n 與 Tailscale volume。
+
+詳細步驟、組態與驗收清單見 [plan.md](plan.md)。

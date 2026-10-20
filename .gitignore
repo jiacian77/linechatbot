@@ -1,5 +1,11 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]
 saved_images/
+node_modules/
+.n8n/
+
+work/

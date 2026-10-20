@@ -1,0 +1,93 @@
+name: linebot
+
+services:
+  workflow-init:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: "no"
+    environment:
+      N8N_USER_FOLDER: /home/node/.n8n
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      GENERIC_TIMEZONE: Asia/Taipei
+      TZ: Asia/Taipei
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        if [ ! -f /home/node/.n8n/.linebot-workflow-imported ]; then
+          n8n import:workflow --input=/seed/linebot-workflow.json &&
+          touch /home/node/.n8n/.linebot-workflow-imported;
+        fi
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows/linebot-workflow.json:/seed/linebot-workflow.json:ro
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    environment:
+      CHANNEL_ACCESS_TOKEN: ${CHANNEL_ACCESS_TOKEN:?Set CHANNEL_ACCESS_TOKEN in .env}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      N8N_HOST: 0.0.0.0
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_EDITOR_BASE_URL: http://localhost:5678/
+      WEBHOOK_URL: http://n8n:5678/
+      N8N_USER_FOLDER: /home/node/.n8n
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      GENERIC_TIMEZONE: Asia/Taipei
+      TZ: Asia/Taipei
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      workflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  gateway:
+    build: ./gateway
+    restart: unless-stopped
+    environment:
+      CHANNEL_SECRET: ${CHANNEL_SECRET:?Set CHANNEL_SECRET in .env}
+      N8N_WEBHOOK_URL: http://n8n:5678/webhook/linebot-inbound
+      PORT: 8080
+    expose:
+      - "8080"
+    depends_on:
+      n8n:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  tailscale:
+    image: tailscale/tailscale:stable
+    restart: unless-stopped
+    network_mode: service:gateway
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_EXTRA_ARGS: --hostname=linebot
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+
+volumes:
+  n8n_data:
+  tailscale_state:
